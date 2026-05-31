@@ -12,6 +12,11 @@ import android.widget.VideoView;
 import android.media.MediaPlayer;
 
 public class OnsVideoActivity extends Activity {
+    @Override
+    protected void attachBaseContext(android.content.Context newBase) {
+        super.attachBaseContext(com.yuki.yukihub.util.UiScaleUtil.wrap(newBase));
+    }
+
     public static final String EXTRA_VIDEO_URI = "video_uri";
 
     @Override protected void onCreate(Bundle savedInstanceState) {

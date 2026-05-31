@@ -6,7 +6,7 @@ import android.database.sqlite.SQLiteOpenHelper;
 
 public class YukiDatabaseHelper extends SQLiteOpenHelper {
     public static final String DB_NAME = "yukihub.db";
-    public static final int DB_VERSION = 10;
+    public static final int DB_VERSION = 12;
 
     public YukiDatabaseHelper(Context context) {
         super(context, DB_NAME, null, DB_VERSION);
@@ -37,7 +37,8 @@ public class YukiDatabaseHelper extends SQLiteOpenHelper {
                 "playtime_reset_at INTEGER DEFAULT 0," +
                 "created_at INTEGER NOT NULL," +
                 "updated_at INTEGER NOT NULL," +
-                "hidden INTEGER DEFAULT 0" +
+                "hidden INTEGER DEFAULT 0," +
+                "favorite INTEGER DEFAULT 0" +
                 ")");
         db.execSQL("CREATE TABLE play_sessions (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT," +
@@ -91,16 +92,46 @@ safeAlter(db, "ALTER TABLE games ADD COLUMN gaishi_local_game_id TEXT");
         if (oldVersion < 10) {
             safeAlter(db, "ALTER TABLE games ADD COLUMN gamehub_launch_mode TEXT DEFAULT 'game'");
         }
+        if (oldVersion < 11) {
+            safeAlter(db, "ALTER TABLE games ADD COLUMN favorite INTEGER DEFAULT 0");
+        }
+        if (oldVersion < 12) {
+            upgradeMetadataCachePrimaryKey(db);
+        }
     }
 
     private void createMetadataCacheTable(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE IF NOT EXISTS metadata_cache (" +
-                "game_id INTEGER PRIMARY KEY," +
+                "game_id INTEGER NOT NULL," +
                 "source TEXT NOT NULL," +
                 "source_id TEXT," +
                 "json TEXT NOT NULL," +
-                "updated_at INTEGER NOT NULL" +
+                "updated_at INTEGER NOT NULL," +
+                "PRIMARY KEY(game_id, source)" +
                 ")");
+    }
+
+    private void upgradeMetadataCachePrimaryKey(SQLiteDatabase db) {
+        try {
+            db.beginTransaction();
+            db.execSQL("CREATE TABLE IF NOT EXISTS metadata_cache_new (" +
+                    "game_id INTEGER NOT NULL," +
+                    "source TEXT NOT NULL," +
+                    "source_id TEXT," +
+                    "json TEXT NOT NULL," +
+                    "updated_at INTEGER NOT NULL," +
+                    "PRIMARY KEY(game_id, source)" +
+                    ")");
+            db.execSQL("INSERT OR REPLACE INTO metadata_cache_new(game_id,source,source_id,json,updated_at) " +
+                    "SELECT game_id,source,source_id,json,updated_at FROM metadata_cache");
+            db.execSQL("DROP TABLE IF EXISTS metadata_cache");
+            db.execSQL("ALTER TABLE metadata_cache_new RENAME TO metadata_cache");
+            db.setTransactionSuccessful();
+        } catch (Exception ignored) {
+            try { createMetadataCacheTable(db); } catch (Exception ignored2) { }
+        } finally {
+            try { db.endTransaction(); } catch (Exception ignored) { }
+        }
     }
 
     private void upgradePlaySessionsForSync(SQLiteDatabase db) {

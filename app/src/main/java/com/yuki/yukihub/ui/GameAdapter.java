@@ -20,10 +20,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> {
-    public interface OnGameClickListener { void onGameClick(Game game); void onGameLongClick(Game game); void onStatusClick(Game game); }
+    public interface OnGameClickListener { void onGameClick(Game game); void onGameDoubleClick(Game game); void onGameLongClick(Game game); void onStatusClick(Game game); }
     private final List<Game> games = new ArrayList<>();
     private OnGameClickListener listener;
     private long selectedGameId = -1;
+    private long lastClickTime = 0L;
+    private long lastClickGameId = -1L;
 
     public void setOnGameClickListener(OnGameClickListener listener) { this.listener = listener; }
     public void setSelectedGameId(long id) { selectedGameId = id; notifyDataSetChanged(); }
@@ -42,7 +44,12 @@ public class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> {
         h.itemView.setBackgroundResource(h.itemView.isSelected() ? R.drawable.bg_game_card_selected : R.drawable.bg_game_card);
         if (h.cardGlow != null) h.cardGlow.setVisibility(h.itemView.isSelected() ? View.VISIBLE : View.GONE);
         h.title.setText(g.title);
-        h.engine.setText(g.engine.getDisplayName());
+        if (h.favoriteBadge != null) h.favoriteBadge.setVisibility(g.favorite ? View.VISIBLE : View.GONE);
+        h.engineCover.setText(g.engine.getDisplayName());
+        h.engineTitle.setText(g.engine.getDisplayName());
+        boolean engineOnCover = "cover".equals(getEngineLabelPosition(h.itemView));
+        h.engineCover.setVisibility(engineOnCover ? View.VISIBLE : View.GONE);
+        h.engineTitle.setVisibility(engineOnCover ? View.GONE : View.VISIBLE);
         h.playTime.setText("总时长 " + TimeFormatUtil.playTime(g.totalPlayTime));
         bindStatusBadge(h.statusBadge, g.playStatus);
         String coverUri = chooseSafeCoverUri(g);
@@ -73,9 +80,16 @@ public class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> {
         });
         h.itemView.setOnClickListener(v -> {
             try { v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); } catch (Throwable ignored) { }
+            long now = System.currentTimeMillis();
+            boolean isDouble = lastClickGameId == g.id && (now - lastClickTime) <= 350L;
+            lastClickGameId = g.id;
+            lastClickTime = now;
             selectedGameId = g.id;
             notifyDataSetChanged();
-            if (listener != null) listener.onGameClick(g);
+            if (listener != null) {
+                if (isDouble) listener.onGameDoubleClick(g);
+                else listener.onGameClick(g);
+            }
         });
         h.itemView.setOnLongClickListener(v -> {
             try { v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); } catch (Throwable ignored) { }
@@ -126,15 +140,25 @@ public class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> {
         if (g.coverUri != null && !g.coverUri.isEmpty()) return g.coverUri;
         return null;
     }
-
     private String initials(String title) {
         if (title == null || title.trim().isEmpty()) return "YH";
         return title.trim().substring(0, 1).toUpperCase();
     }
 
+    private String getEngineLabelPosition(View view) {
+        try {
+            return view.getContext().getApplicationContext()
+                    .getSharedPreferences("yukihub_prefs", android.content.Context.MODE_PRIVATE)
+                    .getString("engine_label_position", "title");
+        } catch (Throwable ignored) {
+            return "title";
+        }
+    }
+
+
     static class Holder extends RecyclerView.ViewHolder {
         ImageView cover;
-        TextView placeholder, title, engine, playTime, statusBadge;
+        TextView placeholder, title, favoriteBadge, engineCover, engineTitle, playTime, statusBadge;
         CardGlowView cardGlow;
         Holder(@NonNull View itemView) {
             super(itemView);
@@ -142,7 +166,9 @@ public class GameAdapter extends RecyclerView.Adapter<GameAdapter.Holder> {
             cover = itemView.findViewById(R.id.ivCover);
             placeholder = itemView.findViewById(R.id.tvCoverPlaceholder);
             title = itemView.findViewById(R.id.tvGameTitle);
-            engine = itemView.findViewById(R.id.tvEngine);
+            favoriteBadge = itemView.findViewById(R.id.tvFavoriteBadge);
+            engineCover = itemView.findViewById(R.id.tvEngineCover);
+            engineTitle = itemView.findViewById(R.id.tvEngineTitle);
             playTime = itemView.findViewById(R.id.tvPlayTime);
             statusBadge = itemView.findViewById(R.id.tvStatusBadge);
         }

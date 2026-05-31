@@ -14,9 +14,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class BangumiClient {
-    private static final String SEARCH_ENDPOINT = "https://api.bgm.tv/v0/search/subjects";
+    private static final String SEARCH_ENDPOINT_BGM = "https://api.bgm.tv/v0/search/subjects";
+    private static final String SEARCH_ENDPOINT_MIRROR = "https://api.bangumi.one/v0/search/subjects";
 
     public static List<VnMetadata> searchCandidates(String keyword, String token, int limit) throws Exception {
+        return searchCandidates(keyword, token, limit, false);
+    }
+
+    public static List<VnMetadata> searchCandidates(String keyword, String token, int limit, boolean useMirror) throws Exception {
         List<VnMetadata> out = new ArrayList<>();
         if (keyword == null || keyword.trim().isEmpty()) return out;
         if (token == null || token.trim().isEmpty()) throw new IllegalArgumentException("Bangumi token required");
@@ -28,7 +33,8 @@ public class BangumiClient {
         filter.put("type", new JSONArray().put(4)); // 4 = 游戏
         body.put("filter", filter);
 
-        String url = SEARCH_ENDPOINT + "?limit=" + Math.max(1, Math.min(10, limit)) + "&offset=0";
+        String endpoint = useMirror ? SEARCH_ENDPOINT_MIRROR : SEARCH_ENDPOINT_BGM;
+        String url = endpoint + "?limit=" + Math.max(1, Math.min(10, limit)) + "&offset=0";
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setRequestMethod("POST");
         conn.setConnectTimeout(10000);
@@ -59,7 +65,11 @@ public class BangumiClient {
     }
 
     public static VnMetadata searchFirst(String keyword, String token) throws Exception {
-        List<VnMetadata> list = searchCandidates(keyword, token, 1);
+        return searchFirst(keyword, token, false);
+    }
+
+    public static VnMetadata searchFirst(String keyword, String token, boolean useMirror) throws Exception {
+        List<VnMetadata> list = searchCandidates(keyword, token, 1, useMirror);
         return list.isEmpty() ? null : list.get(0);
     }
 

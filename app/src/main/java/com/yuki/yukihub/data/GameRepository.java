@@ -27,9 +27,13 @@ public class GameRepository {
     }
 
     public List<Game> getAll() {
+        return getAll("last_played_at DESC, created_at DESC");
+    }
+
+    public List<Game> getAll(String orderBy) {
         List<Game> list = new ArrayList<>();
         SQLiteDatabase db = helper.getReadableDatabase();
-        Cursor c = db.query("games", null, "hidden=0", null, null, null, "last_played_at DESC, created_at DESC");
+        Cursor c = db.query("games", null, "hidden=0", null, null, null, orderBy == null || orderBy.trim().isEmpty() ? "last_played_at DESC, created_at DESC" : orderBy);
         try {
             while (c.moveToNext()) list.add(fromCursor(c));
         } finally {
@@ -171,8 +175,67 @@ public class GameRepository {
     }
 
     public void addPlayTime(long gameId, long start, long end, long duration) {
-        long sessionId = startPlaySession(gameId, start, "external");
-        finishPlaySession(sessionId, end, 0L, Long.MAX_VALUE);
+        if (duration <= 0) duration = Math.max(0L, end - start);
+        addManualPlayTime(gameId, duration, end <= 0 ? System.currentTimeMillis() : end);
+    }
+
+    public void addManualPlayTime(long gameId, long duration) {
+        addManualPlayTime(gameId, duration, System.currentTimeMillis());
+    }
+
+    public void addManualPlayTime(long gameId, long duration, long end) {
+        if (gameId <= 0 || duration <= 0) return;
+        SQLiteDatabase db = helper.getWritableDatabase();
+        long now = System.currentTimeMillis();
+        long safeEnd = end <= 0 ? now : end;
+        long start = Math.max(0L, safeEnd - duration);
+        ContentValues session = new ContentValues();
+        session.put("game_id", gameId);
+        session.put("start_time", start);
+        session.put("end_time", safeEnd);
+        session.put("duration", duration);
+        session.put("launch_type", "manual");
+        session.put("session_uuid", UUID.randomUUID().toString());
+        session.put("device_id", "local");
+        session.put("created_at", now);
+        session.put("updated_at", now);
+        session.put("dirty", 1);
+        session.put("deleted", 0);
+        db.insert("play_sessions", null, session);
+        db.execSQL("UPDATE games SET total_play_time = total_play_time + ?, last_played_at = MAX(IFNULL(last_played_at,0), ?), updated_at = ? WHERE id = ?",
+                new Object[]{duration, safeEnd, now, gameId});
+    }
+
+    public void setManualPlayTimeForGame(long gameId, long totalDuration) {
+        if (gameId <= 0) return;
+        SQLiteDatabase db = helper.getWritableDatabase();
+        long now = System.currentTimeMillis();
+        long safeDuration = Math.max(0L, totalDuration);
+        db.delete("play_sessions", "game_id=?", new String[]{String.valueOf(gameId)});
+        long lastPlayed = 0L;
+        if (safeDuration > 0) {
+            lastPlayed = now;
+            long start = Math.max(0L, now - safeDuration);
+            ContentValues session = new ContentValues();
+            session.put("game_id", gameId);
+            session.put("start_time", start);
+            session.put("end_time", now);
+            session.put("duration", safeDuration);
+            session.put("launch_type", "manual");
+            session.put("session_uuid", UUID.randomUUID().toString());
+            session.put("device_id", "local");
+            session.put("created_at", now);
+            session.put("updated_at", now);
+            session.put("dirty", 1);
+            session.put("deleted", 0);
+            db.insert("play_sessions", null, session);
+        }
+        ContentValues v = new ContentValues();
+        v.put("total_play_time", safeDuration);
+        v.put("last_played_at", lastPlayed);
+        v.put("playtime_reset_at", now);
+        v.put("updated_at", now);
+        db.update("games", v, "id=?", new String[]{String.valueOf(gameId)});
     }
 
     public static class PlayActivity {
@@ -270,6 +333,7 @@ o.put("description", c.getString(c.getColumnIndexOrThrow("description")));
                 o.put("created_at", c.getLong(c.getColumnIndexOrThrow("created_at")));
                 o.put("updated_at", c.getLong(c.getColumnIndexOrThrow("updated_at")));
                 o.put("hidden", c.getInt(c.getColumnIndexOrThrow("hidden")) == 1);
+                o.put("favorite", c.getInt(c.getColumnIndexOrThrow("favorite")) == 1);
                 arr.put(o);
             }
         } finally {
@@ -351,6 +415,7 @@ g.description = o.optString("description", g.description);
             g.createdAt = o.optLong("created_at", g.createdAt);
             g.updatedAt = Math.max(g.updatedAt, o.optLong("updated_at", g.updatedAt));
             g.hidden = o.optBoolean("hidden", g.hidden);
+            g.favorite = o.optBoolean("favorite", g.favorite);
             if (exists) update(g); else insert(g);
             if (resetAdvanced && g.id > 0) {
                 db.delete("play_sessions", "game_id=? AND (COALESCE(end_time,start_time,0) <= ?)", new String[]{String.valueOf(g.id), String.valueOf(g.playtimeResetAt)});
@@ -507,6 +572,7 @@ v.put("description", g.description);
         v.put("created_at", g.createdAt);
         v.put("updated_at", g.updatedAt);
         v.put("hidden", g.hidden ? 1 : 0);
+        v.put("favorite", g.favorite ? 1 : 0);
         return v;
     }
 
@@ -536,6 +602,8 @@ g.description = c.getString(c.getColumnIndexOrThrow("description"));
         g.createdAt = c.getLong(c.getColumnIndexOrThrow("created_at"));
         g.updatedAt = c.getLong(c.getColumnIndexOrThrow("updated_at"));
         g.hidden = c.getInt(c.getColumnIndexOrThrow("hidden")) == 1;
+        int favoriteIndex = c.getColumnIndex("favorite");
+        g.favorite = favoriteIndex >= 0 && !c.isNull(favoriteIndex) && c.getInt(favoriteIndex) == 1;
         return g;
     }
 

@@ -624,38 +624,123 @@ if (rootUri != null && !rootUri.trim().isEmpty()) {
     }
 
     public static Intent buildInternalKrkrIntent(Context context, String gamePath, String launchTarget) {
-        return buildInternalKrkrIntent(context, gamePath, launchTarget, false);
+        return buildInternalKrkrIntent(context, gamePath, launchTarget, false, false);
     }
 
     public static Intent buildInternalKrkrIntent(Context context, String gamePath, String launchTarget, boolean originMode) {
+        return buildInternalKrkrIntent(context, gamePath, launchTarget, originMode, false);
+    }
+
+    public static Intent buildInternalKrkrIntent(Context context, String gamePath, String launchTarget, boolean originMode, boolean compatMode) {
         Intent i = new Intent(context, originMode ? org.tvp.kirikiri2.KR2Activity.class : com.akira.tyranoemu.remote.Kirikiroid139.class);
         String resolvedPath = originMode ? null : resolveInternalKrkrPath(gamePath, launchTarget);
-        Log.i("EmulatorLauncher", "internal KRKR originMode=" + originMode + " root=" + gamePath + " target=" + launchTarget + " resolved=" + resolvedPath);
-        if (resolvedPath != null && !resolvedPath.isEmpty()) {
-            String krkrPath = toKrkrFileUrl(resolvedPath);
-            Log.i("EmulatorLauncher", "internal KRKR final path=" + krkrPath);
-            i.putExtra("gamePath", krkrPath);
-            i.putExtra("path", krkrPath);
+        String rawRootPath = stripFileScheme(uriToFilePath(gamePath));
+        String path = resolvedPath == null ? null : stripFileScheme(resolvedPath);
+        String rootPath = krkrRootForPath(rawRootPath, path);
+        Log.i("EmulatorLauncher", "internal KRKR originMode=" + originMode + " root=" + gamePath + " target=" + launchTarget + " resolved=" + resolvedPath + " rootPath=" + rootPath);
+        if (path != null && !path.isEmpty()) {
+            // 普通模式也使用普通文件路径，让默认启动链更接近原生 KRKR / TY 的读取方式。
+            i.putExtra("path", path);
+            i.putExtra("gamePath", path);
+            if (compatMode) {
+                // 兼容模式再补齐更多历史/启动信息。
+                i.putExtra("game", path);
+                i.putExtra("startup", path);
+                i.putExtra("launchFile", launchTarget == null ? "" : launchTarget);
+            }
+        }
+        if (rootPath != null && !rootPath.isEmpty()) {
+            i.putExtra("projectRoot", rootPath);
+            i.putExtra("gamedir", rootPath);
         }
         i.putExtra("rootUri", gamePath);
         i.putExtra("launchTarget", launchTarget);
         i.putExtra("originMode", originMode);
+        i.putExtra("focus", "true");
+        if (!originMode && compatMode) i.putExtra("maps", true);
+        i.putExtra("compatMode", compatMode);
+        i.putExtra("orientation", 6);
         i.putExtra("launchMode", originMode ? "internal.krkr.origin" : "internal.krkr");
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
         return i;
     }
 
     private static String resolveInternalKrkrPath(String rootUri, String launchTarget) {
-        // Tyranor KR2 direct launch passes the selected launch file as "path".
-        // For KR2 HistoryBean: path = full launch file path, parent = game root, name = launch file name.
-        String rootPath = uriToFilePath(rootUri);
+        // 对齐 Tyranor/Kirikiroid 的思路：
+        // 1) 优先解析为真正的入口文件
+        // 2) 其次才退回目录本身
+        String rootPath = stripFileScheme(uriToFilePath(rootUri));
         if (rootPath == null || rootPath.isEmpty()) return rootUri;
         String target = launchTarget == null ? "" : launchTarget.trim();
-        if (target.isEmpty() || "[游戏目录]".equals(target) || "DIR".equalsIgnoreCase(target) || "XP3_FIRST".equalsIgnoreCase(target)) {
+        if (target.isEmpty() || "[游戏目录]".equals(target) || "DIR".equalsIgnoreCase(target)) {
             return rootPath;
         }
-        if (target.startsWith("/")) return target;
-        return rootPath.endsWith("/") ? rootPath + target : rootPath + "/" + target;
+        if ("XP3_FIRST".equalsIgnoreCase(target)) {
+            String firstXp3 = findFirstChildBySuffix(rootPath, ".xp3");
+            return firstXp3 == null ? rootPath : firstXp3;
+        }
+        if (target.startsWith("/")) {
+            File f = new File(target);
+            return f.isFile() ? f.getAbsolutePath() : target;
+        }
+        File root = new File(rootPath);
+        File targetFile = new File(root, target);
+        if (targetFile.isFile()) return targetFile.getAbsolutePath();
+        if (targetFile.isDirectory()) return targetFile.getAbsolutePath();
+        if (target.endsWith(".xp3") || target.endsWith(".tjs") || target.endsWith(".exe") || target.endsWith(".dll")) {
+            return targetFile.getAbsolutePath();
+        }
+        String preferred = findKrkrPreferredEntry(rootPath);
+        if (preferred != null) return preferred;
+        return rootPath;
+    }
+
+    private static String findKrkrPreferredEntry(String rootPath) {
+        if (rootPath == null || rootPath.trim().isEmpty()) return null;
+        try {
+            File root = new File(rootPath);
+            if (!root.isDirectory()) return null;
+            String[] names = new String[]{"data.xp3", "startup.tjs", "patch.xp3"};
+            for (String name : names) {
+                File f = new File(root, name);
+                if (f.isFile()) return f.getAbsolutePath();
+            }
+        } catch (Throwable ignored) { }
+        return findFirstChildBySuffix(rootPath, ".xp3");
+    }
+
+    private static String krkrRootForPath(String rawRootPath, String launchPath) {
+        try {
+            if (rawRootPath != null && !rawRootPath.trim().isEmpty()) {
+                File raw = new File(rawRootPath);
+                if (raw.isDirectory()) return raw.getAbsolutePath();
+                File parent = raw.getParentFile();
+                if (parent != null) return parent.getAbsolutePath();
+            }
+            if (launchPath != null && !launchPath.trim().isEmpty()) {
+                File launch = new File(launchPath);
+                if (launch.isDirectory()) return launch.getAbsolutePath();
+                File parent = launch.getParentFile();
+                if (parent != null) return parent.getAbsolutePath();
+            }
+        } catch (Throwable ignored) { }
+        return rawRootPath;
+    }
+
+    private static String findFirstChildBySuffix(String rootPath, String suffix) {
+        if (rootPath == null || rootPath.trim().isEmpty() || suffix == null || suffix.trim().isEmpty()) return null;
+        try {
+            File root = new File(rootPath);
+            File[] children = root.listFiles();
+            if (children == null) return null;
+            String lowerSuffix = suffix.toLowerCase(Locale.ROOT);
+            for (File child : children) {
+                if (child == null || !child.isFile()) continue;
+                String name = child.getName();
+                if (name != null && name.toLowerCase(Locale.ROOT).endsWith(lowerSuffix)) return child.getAbsolutePath();
+            }
+        } catch (Throwable ignored) { }
+        return null;
     }
 
     private static String toKrkrFileUrl(String path) {

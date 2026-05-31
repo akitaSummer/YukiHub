@@ -23,6 +23,7 @@ public class Game {
     public long createdAt;
     public long updatedAt;
     public boolean hidden;
+    public boolean favorite;
 
     public Game() {
         engine = EngineType.UNKNOWN;

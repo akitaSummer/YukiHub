@@ -24,8 +24,13 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-
 public class AuthActivity extends AppCompatActivity {
+    @Override
+    protected void attachBaseContext(android.content.Context newBase) {
+        super.attachBaseContext(com.yuki.yukihub.util.UiScaleUtil.wrap(newBase));
+    }
+
+
 
     private static final String PREFS_NAME = "yukihub_prefs";
     private static final String AUTH_BASE_URL = "https://yukihub.kesug.com/api";

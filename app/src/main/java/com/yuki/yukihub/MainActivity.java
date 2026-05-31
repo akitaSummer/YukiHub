@@ -1,6 +1,7 @@
 package com.yuki.yukihub;
 
 import android.Manifest;
+import android.animation.ObjectAnimator;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
@@ -41,6 +42,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.animation.LinearInterpolator;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -49,6 +51,7 @@ import android.widget.ImageView;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -108,10 +111,12 @@ import com.yuki.yukihub.scanner.ScanResult;
 import com.yuki.yukihub.ui.GameAdapter;
 import com.yuki.yukihub.ui.ScanResultAdapter;
 import com.yuki.yukihub.util.TimeFormatUtil;
+import com.yuki.yukihub.util.UiScaleUtil;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.text.Collator;
 import java.util.Map;
 import java.util.Calendar;
 import java.util.Set;
@@ -119,6 +124,11 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        super.attachBaseContext(UiScaleUtil.wrap(newBase));
+    }
+
     private GameRepository repository;
 private MetadataRepository metadataRepository;
     private GameAdapter adapter;
@@ -149,15 +159,31 @@ private boolean launchedExternal = false;
 private static final long MIN_PLAY_SESSION_MS = 60_000L;
 private static final long MAX_PLAY_SESSION_MS = 12L * 60L * 60L * 1000L;
     private boolean coverScanRunning = false;
+    private boolean coverMaintenanceDone = false;
     private boolean autoLibraryScanRunning = false;
-private boolean webDavAutoSyncRunning = false;
+    private boolean webDavAutoSyncRunning = false;
+    private boolean scanLoadingAnimated = false;
+    private ObjectAnimator scanAnimator;
+    private ImageView ivScanLoading;
     private SharedPreferences prefs;
     private static final String PREFS_NAME = "yukihub_prefs";
     private static final String KEY_LAST_SCAN_ROOT_URI = "last_scan_root_uri";
+    private static final String KEY_STARTUP_SCAN_DEPTH = "startup_scan_depth";
+    private static final String KEY_AUTO_SCAN_ON_STARTUP = "auto_scan_on_startup";
+    private static final String KEY_ENGINE_LABEL_POSITION = "engine_label_position";
+    private static final String KEY_SIDE_TRANSLATED_PREFIX = "side_translated_";
+    private static final int DEFAULT_STARTUP_SCAN_DEPTH = 2;
+    private static final int MAX_STARTUP_SCAN_DEPTH = 4;
 private static final String KEY_METADATA_SOURCE = "metadata_source";
-private static final String KEY_BANGUMI_TOKEN = "bangumi_token";
-private static final String SOURCE_VNDB = "vndb";
-private static final String SOURCE_BANGUMI = "bangumi";
+    private static final String KEY_BANGUMI_TOKEN = "bangumi_token";
+    private static final String KEY_KR_COMPAT_MODE = "kr_compat_mode";
+    private static final String SOURCE_VNDB = "vndb";
+    private static final String SOURCE_BANGUMI = "bangumi";
+    private static final String SOURCE_BANGUMI_MIRROR = "bangumi_mirror";
+private static final String KEY_SORT_MODE = "sort_mode";
+private static final String SORT_MODE_RECENT = "recent";
+private static final String SORT_MODE_NAME = "name";
+private static final String SORT_MODE_NEWEST = "newest";
 private static final String KEY_PROFILE_NAME = "profile_name";
 private static final String KEY_AUTH_ACCESS_TOKEN = "auth_access_token";
 private static final String KEY_AUTH_REFRESH_TOKEN = "auth_refresh_token";
@@ -211,7 +237,10 @@ private ActivityResultLauncher<String[]> backupOpenLauncher;
         setupLaunchers();
         setupUi();
         loadGames();
-        autoScanLastRootIfAvailable();
+        if (ivScanLoading != null) ivScanLoading.setVisibility(View.GONE);
+        if (prefs != null && prefs.getBoolean(KEY_AUTO_SCAN_ON_STARTUP, false)) {
+            autoScanLastRootIfAvailable();
+        }
         ensureStoragePermissionForInternalKrkr();
     }
 
@@ -763,6 +792,7 @@ if (sideTranslateToggle != null) sideTranslateToggle.setOnClickListener(v -> { c
         adapter = new GameAdapter();
         adapter.setOnGameClickListener(new GameAdapter.OnGameClickListener() {
             @Override public void onGameClick(Game game) { updateSideDetail(game); }
+            @Override public void onGameDoubleClick(Game game) { if (game != null) launchGame(game); }
             @Override public void onGameLongClick(Game game) { showEditDialog(game); }
             @Override public void onStatusClick(Game game) { updateSideDetail(game); showPlayStatusDialog(game, null); }
         });
@@ -770,7 +800,8 @@ if (sideTranslateToggle != null) sideTranslateToggle.setOnClickListener(v -> { c
         recycler.setAdapter(adapter);
 View addButton = findViewById(R.id.btnAdd);
         View scanButton = findViewById(R.id.btnScan);
-View settingsButton = findViewById(R.id.btnSettings);
+        ivScanLoading = findViewById(R.id.ivScanLoading);
+ View settingsButton = findViewById(R.id.btnSettings);
         applyTopActionFeedback(addButton);
 applyTopActionFeedback(scanButton);
 applyTopActionFeedback(settingsButton);
@@ -811,6 +842,29 @@ bindFilter(R.id.filterPlaying, "PLAYING"); bindFilter(R.id.filterCompleted, "COM
 private void clickFeedback(View v) {
     if (v == null) return;
     try { v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY); } catch (Throwable ignored) { }
+}
+
+private void setScanLoading(boolean loading) {
+    if (ivScanLoading == null) return;
+    if (loading) {
+        ivScanLoading.setVisibility(View.VISIBLE);
+        ivScanLoading.setRotation(0f);
+        if (scanAnimator == null) {
+            scanAnimator = ObjectAnimator.ofFloat(ivScanLoading, View.ROTATION, 0f, 360f);
+            scanAnimator.setDuration(900L);
+            scanAnimator.setRepeatCount(ObjectAnimator.INFINITE);
+            scanAnimator.setInterpolator(new LinearInterpolator());
+        }
+        if (!scanAnimator.isStarted()) scanAnimator.start();
+        scanLoadingAnimated = true;
+    } else {
+        if (scanAnimator != null) {
+            try { scanAnimator.cancel(); } catch (Throwable ignored) { }
+        }
+        ivScanLoading.setRotation(0f);
+        ivScanLoading.setVisibility(View.GONE);
+        scanLoadingAnimated = false;
+    }
 }
 
 private void showProfileDialog() {
@@ -1713,6 +1767,12 @@ allGames.clear();
 allGames.addAll(repository.getAll());
 rebuildDeveloperFilters();
 applyFilter();
+runCoverMaintenanceOnceIfNeeded();
+}
+
+private void runCoverMaintenanceOnceIfNeeded() {
+if (coverMaintenanceDone) return;
+coverMaintenanceDone = true;
 repairMissingMetadataCoversIfNeeded();
 scanMissingCoversIfNeeded();
 }
@@ -1741,6 +1801,7 @@ scanMissingCoversIfNeeded();
             }
             shown.add(g);
         }
+        sortGames(shown);
         adapter.submit(shown);
         tvEmpty.setVisibility(shown.isEmpty() ? View.VISIBLE : View.GONE);
         tvStats.setText(allGames.size() + " Games\n" + TimeFormatUtil.playTime(total));
@@ -1750,6 +1811,58 @@ scanMissingCoversIfNeeded();
         } else if (selectedGame == null || !containsGameId(shown, selectedGame.id)) {
             updateSideDetail(shown.get(0));
         }
+    }
+
+    private void sortGames(List<Game> list) {
+        if (list == null || list.size() <= 1) return;
+        String mode = prefs == null ? SORT_MODE_RECENT : prefs.getString(KEY_SORT_MODE, SORT_MODE_RECENT);
+        java.util.Comparator<Game> cmp;
+        if (SORT_MODE_NAME.equals(mode)) {
+            final Collator collator = Collator.getInstance(Locale.CHINA);
+            collator.setStrength(Collator.PRIMARY);
+            cmp = (a, b) -> {
+                if (a == null && b == null) return 0;
+                if (a == null) return 1;
+                if (b == null) return -1;
+                boolean af = a.favorite;
+                boolean bf = b.favorite;
+                if (af != bf) return af ? -1 : 1;
+                String at = a.title == null ? "" : a.title;
+                String bt = b.title == null ? "" : b.title;
+                int r = collator.compare(at, bt);
+                if (r != 0) return r;
+                return Long.compare(b.createdAt, a.createdAt);
+            };
+        } else if (SORT_MODE_NEWEST.equals(mode)) {
+            cmp = (a, b) -> {
+                if (a == null && b == null) return 0;
+                if (a == null) return 1;
+                if (b == null) return -1;
+                boolean af = a.favorite;
+                boolean bf = b.favorite;
+                if (af != bf) return af ? -1 : 1;
+                int r = Long.compare(b.createdAt, a.createdAt);
+                if (r != 0) return r;
+                return Long.compare(b.lastPlayedAt, a.lastPlayedAt);
+            };
+        } else {
+            cmp = (a, b) -> {
+                if (a == null && b == null) return 0;
+                if (a == null) return 1;
+                if (b == null) return -1;
+                boolean af = a.favorite;
+                boolean bf = b.favorite;
+                if (af != bf) return af ? -1 : 1;
+                int r = Long.compare(b.lastPlayedAt, a.lastPlayedAt);
+                if (r != 0) return r;
+                r = Long.compare(b.createdAt, a.createdAt);
+                if (r != 0) return r;
+                String at = a.title == null ? "" : a.title;
+                String bt = b.title == null ? "" : b.title;
+                return at.compareToIgnoreCase(bt);
+            };
+        }
+        list.sort(cmp);
     }
 
     private boolean containsGameId(List<Game> games, long id) {
@@ -1808,11 +1921,19 @@ private String metadataSource() {
 }
 
 private String metadataSourceLabel() {
-    return SOURCE_BANGUMI.equals(metadataSource()) ? "Bangumi" : "VNDB";
+    String source = metadataSource();
+    if (SOURCE_BANGUMI.equals(source)) return "Bangumi";
+    if (SOURCE_BANGUMI_MIRROR.equals(source)) return "Bangumi镜像";
+    return "VNDB";
 }
 
 private boolean usingBangumi() {
-    return SOURCE_BANGUMI.equals(metadataSource());
+    String source = metadataSource();
+    return SOURCE_BANGUMI.equals(source) || SOURCE_BANGUMI_MIRROR.equals(source);
+}
+
+private boolean usingBangumiMirror() {
+    return SOURCE_BANGUMI_MIRROR.equals(metadataSource());
 }
 
 private String bangumiToken() {
@@ -1820,19 +1941,56 @@ private String bangumiToken() {
 }
 
 private void fetchSelectedMetadata(Game game) {
-    if (usingBangumi()) fetchBangumiMetadata(game); else fetchVndbMetadata(game);
-}
+    if (game == null) return;
 
-private void fetchVndbMetadata(Game game) {
-    if (game == null || game.title == null || game.title.trim().isEmpty()) return;
-    final long id = game.id;
-    VnMetadata cached = metadataRepository == null ? null : metadataRepository.getVndb(id);
+    // 1. 优先显示当前资料源已有缓存。
+    VnMetadata cached = currentSourceCachedMetadata(game.id);
     if (cached != null) {
         applyVndbMetadata(cached, game);
         return;
     }
-    setSideDescription("正在从 VNDB 获取资料…");
-    VndbClient.searchCandidatesAsync(game.title, 5, new VndbClient.CandidatesCallback() {
+
+    // 2. 当前源没有缓存时，不要把已经匹配过的其它源资料一刀切成“未匹配”。
+    //    例如切到 Bangumi 后，原来 VNDB 已匹配的游戏仍继续显示 VNDB 资料。
+    VnMetadata fallback = otherSourceCachedMetadata(game.id);
+    if (fallback != null) {
+        applyVndbMetadata(fallback, game);
+        return;
+    }
+
+    // 3. 只有这个游戏完全没有任何资料缓存时，才按当前资料源自动匹配。
+    if (usingBangumi()) fetchBangumiMetadata(game, false); else fetchVndbMetadata(game, false);
+}
+
+private void fetchSelectedMetadata(Game game, boolean forceRefresh) {
+    if (forceRefresh) {
+        if (usingBangumi()) fetchBangumiMetadata(game, true); else fetchVndbMetadata(game, true);
+    } else {
+        fetchSelectedMetadata(game);
+    }
+}
+
+private VnMetadata currentSourceCachedMetadata(long gameId) {
+    if (metadataRepository == null || gameId <= 0) return null;
+    return usingBangumi() ? metadataRepository.getBangumi(gameId) : metadataRepository.getVndb(gameId);
+}
+
+private VnMetadata otherSourceCachedMetadata(long gameId) {
+    if (metadataRepository == null || gameId <= 0) return null;
+    return usingBangumi() ? metadataRepository.getVndb(gameId) : metadataRepository.getBangumi(gameId);
+}
+
+    private void fetchVndbMetadata(Game game, boolean forceRefresh) {
+        if (game == null || game.title == null || game.title.trim().isEmpty()) return;
+        final long id = game.id;
+        final String keyword = buildMetadataSearchKeyword(game.title);
+        VnMetadata cached = metadataRepository == null || forceRefresh ? null : metadataRepository.getVndb(id);
+        if (cached != null) {
+            applyVndbMetadata(cached, game);
+            return;
+        }
+        setSideDescription("正在从 VNDB 获取资料…");
+        VndbClient.searchCandidatesAsync(keyword, 5, new VndbClient.CandidatesCallback() {
         @Override public void onSuccess(List<VnMetadata> data) {
             runOnUiThread(() -> {
                 if (selectedGame == null || selectedGame.id != id) return;
@@ -1855,16 +2013,17 @@ private void fetchVndbMetadata(Game game) {
     });
 }
 
-private void fetchBangumiMetadata(Game game) {
-    if (game == null || game.title == null || game.title.trim().isEmpty()) return;
-    final long id = game.id;
-    VnMetadata cached = metadataRepository == null ? null : metadataRepository.getBangumi(id);
-    if (cached != null) {
-        applyVndbMetadata(cached, game);
-        return;
-    }
-    String token = bangumiToken();
-    if (token == null || token.trim().isEmpty()) {
+private void fetchBangumiMetadata(Game game, boolean forceRefresh) {
+        if (game == null || game.title == null || game.title.trim().isEmpty()) return;
+        final long id = game.id;
+        final String keyword = buildMetadataSearchKeyword(game.title);
+        VnMetadata cached = metadataRepository == null || forceRefresh ? null : metadataRepository.getBangumi(id);
+        if (cached != null) {
+            applyVndbMetadata(cached, game);
+            return;
+        }
+        String token = bangumiToken();
+        if (token == null || token.trim().isEmpty()) {
         sideDetailOriginalTitle.setText("Bangumi 未配置 Token");
         setSideDescription("请在右上角 设置 -> 元数据源 中填写 Bangumi Access Token。\n\n提示：Bangumi 官方建议账号注册超过三个月后再申请和使用 Token。");
         return;
@@ -1872,7 +2031,7 @@ private void fetchBangumiMetadata(Game game) {
     setSideDescription("正在从 Bangumi 获取资料…");
     new Thread(() -> {
         try {
-            VnMetadata meta = BangumiClient.searchFirst(game.title, token);
+            VnMetadata meta = BangumiClient.searchFirst(keyword, token, usingBangumiMirror());
             runOnUiThread(() -> {
                 if (selectedGame == null || selectedGame.id != id) return;
                 if (meta == null) {
@@ -1933,6 +2092,16 @@ private String readSmallText(InputStream is) throws Exception {
     return bos.toString("UTF-8");
 }
 
+private boolean isTranslatedStateFor(long gameId) {
+    if (prefs == null || gameId <= 0) return false;
+    return prefs.getBoolean(KEY_SIDE_TRANSLATED_PREFIX + gameId, false);
+}
+
+private void setTranslatedStateFor(long gameId, boolean translated) {
+    if (prefs == null || gameId <= 0) return;
+    prefs.edit().putBoolean(KEY_SIDE_TRANSLATED_PREFIX + gameId, translated).apply();
+}
+
 private void updateTranslateButtonState() {
     if (sideTranslateToggle == null) return;
     boolean hasMeta = currentSideMetadata != null;
@@ -1949,12 +2118,14 @@ private void toggleOrTranslateDescription() {
     VnMetadata meta = currentSideMetadata;
     if (sideShowingTranslatedDescription) {
         sideShowingTranslatedDescription = false;
+        setTranslatedStateFor(selectedGame.id, false);
         setSideDescription(emptyText(meta.description, "暂无 VNDB 简介。"));
         updateTranslateButtonState();
         return;
     }
     if (meta.translatedDescription != null && !meta.translatedDescription.trim().isEmpty()) {
         sideShowingTranslatedDescription = true;
+        setTranslatedStateFor(selectedGame.id, true);
         setSideDescription(meta.translatedDescription);
         updateTranslateButtonState();
         return;
@@ -1976,6 +2147,7 @@ private void toggleOrTranslateDescription() {
                 meta.translatedDescription = translated.trim();
                 if (metadataRepository != null) metadataRepository.saveVndb(gameId, meta);
                 sideShowingTranslatedDescription = true;
+                setTranslatedStateFor(gameId, true);
                 setSideDescription(meta.translatedDescription);
                 updateTranslateButtonState();
             });
@@ -2196,12 +2368,19 @@ private void renderTagChips(String tagsText) {
     }
 }
 
-private boolean isConfidentMatch(String localTitle, VnMetadata meta) {
-    if (meta == null || localTitle == null) return false;
-    String a = localTitle.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\u4e00-\\u9fa5ぁ-んァ-ン一-龯]", "");
-    String b = (emptyText(meta.chineseTitle, "") + emptyText(meta.originalTitle, "") + emptyText(meta.romanTitle, "")).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\u4e00-\\u9fa5ぁ-んァ-ン一-龯]", "");
-    return !a.isEmpty() && !b.isEmpty() && (b.contains(a) || a.contains(b));
-}
+private String buildMetadataSearchKeyword(String title) {
+        if (title == null) return "";
+        String cleaned = title.replaceAll("[【\\[][^】\\]]*[】\\]]", " ");
+        cleaned = cleaned.replaceAll("\\s+", " ").trim();
+        return cleaned.isEmpty() ? title.trim() : cleaned;
+    }
+
+    private boolean isConfidentMatch(String localTitle, VnMetadata meta) {
+        if (meta == null || localTitle == null) return false;
+        String a = buildMetadataSearchKeyword(localTitle).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\u4e00-\\u9fa5ぁ-んァ-ン一-龯]", "");
+        String b = (emptyText(meta.chineseTitle, "") + emptyText(meta.originalTitle, "") + emptyText(meta.romanTitle, "")).toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\u4e00-\\u9fa5ぁ-んァ-ン一-龯]", "");
+        return !a.isEmpty() && !b.isEmpty() && (b.contains(a) || a.contains(b));
+    }
 
 private void showVndbCandidateDialog(Game game, List<VnMetadata> list) {
     if (game == null || list == null || list.isEmpty()) return;
@@ -2262,7 +2441,8 @@ applyVndbMetadata(chosen, game);
 
 private void applyVndbMetadata(VnMetadata meta, Game game) {
     currentSideMetadata = meta;
-    sideShowingTranslatedDescription = false;
+    long gameId = game == null ? -1 : game.id;
+    sideShowingTranslatedDescription = gameId > 0 && isTranslatedStateFor(gameId) && meta != null && meta.translatedDescription != null && !meta.translatedDescription.trim().isEmpty();
     if (meta == null) {
         updateTranslateButtonState();
         setSideDescription(emptyText(game.description, "VNDB 暂未匹配到资料。"));
@@ -2271,7 +2451,7 @@ private void applyVndbMetadata(VnMetadata meta, Game game) {
     sideDetailTitle.setText(emptyText(meta.chineseTitle, emptyText(game.title, "未命名游戏")));
     sideDetailOriginalTitle.setText(emptyText(meta.originalTitle, meta.romanTitle));
     updateTranslateButtonState();
-    setSideDescription(emptyText(meta.description, "暂无 VNDB 简介。"));
+    setSideDescription(sideShowingTranslatedDescription ? meta.translatedDescription : emptyText(meta.description, "暂无 VNDB 简介。"));
     sideDetailDate.setText("发布日期：" + emptyText(meta.released, "-"));
     sideDetailDeveloper.setText("开发商：" + emptyText(meta.developer, "-"));
     if (sideDetailPath != null) sideDetailPath.setText("路径：" + displayPath(game.rootUri));
@@ -2291,7 +2471,7 @@ loadRemoteImage(meta.coverUrl, sideDetailCover, "cover_" + emptyText(meta.id, St
 private void updateSideDetail(Game game) {
         selectedGame = game;
         currentSideMetadata = null;
-        sideShowingTranslatedDescription = false;
+        sideShowingTranslatedDescription = game != null && isTranslatedStateFor(game.id);
         updateTranslateButtonState();
         if (adapter != null) adapter.setSelectedGameId(game == null ? -1 : game.id);
         if (sideDetailTitle == null) return;
@@ -2406,7 +2586,7 @@ private void searchBangumiWithKeyword(Game game, String keyword) {
     setSideDescription("正在按自定义关键词搜索 Bangumi…");
     new Thread(() -> {
         try {
-            List<VnMetadata> data = BangumiClient.searchCandidates(keyword, token, 8);
+            List<VnMetadata> data = BangumiClient.searchCandidates(keyword, token, 8, usingBangumiMirror());
             runOnUiThread(() -> {
                 if (selectedGame == null || selectedGame.id != game.id) return;
                 if (data == null || data.isEmpty()) {
@@ -2525,12 +2705,14 @@ private void styleAlertDialogDark(AlertDialog dialog) {
 private void showSideOptions(Game game) {
         if (game == null) return;
         String sourceLabel = metadataSourceLabel();
-        String rematchItem = "重新匹配" + sourceLabel;
+String rematchItem = "重新匹配" + sourceLabel;
         String customSearchItem = usingBangumi() ? "自定义搜索Bangumi" : "自定义搜索VNDB";
         String syncItem = "同步" + sourceLabel + "到卡片";
+        String playTimeItem = "修改游玩时长";
+        String favoriteItem = game.favorite ? "取消收藏" : "收藏游戏";
         String[] items = (game.engine == EngineType.KIRIKIRI || game.engine == EngineType.ONS)
-                ? new String[]{"编辑游戏", "设置游玩状态", rematchItem, customSearchItem, syncItem, "引擎设置", "详细信息", "删除游戏"}
-        : new String[]{"编辑游戏", "设置游玩状态", rematchItem, customSearchItem, syncItem, "详细信息", "删除游戏"};
+                ? new String[]{"编辑游戏", "设置游玩状态", playTimeItem, favoriteItem, rematchItem, customSearchItem, syncItem, "引擎设置", "详细信息", "删除游戏"}
+                : new String[]{"编辑游戏", "设置游玩状态", playTimeItem, favoriteItem, rematchItem, customSearchItem, syncItem, "详细信息", "删除游戏"};
         LinearLayout listRoot = new LinearLayout(this);
         listRoot.setOrientation(LinearLayout.VERTICAL);
         listRoot.setBackgroundResource(R.drawable.bg_dialog);
@@ -2553,9 +2735,19 @@ private void showSideOptions(Game game) {
                 String chosen = ((TextView) v).getText().toString();
                 if ("编辑游戏".equals(chosen)) showEditDialog(game);
                 else if ("设置游玩状态".equals(chosen)) showPlayStatusDialog(game, null);
+                else if (playTimeItem.equals(chosen)) showEditPlayTimeDialog(game);
+                else if (favoriteItem.equals(chosen)) {
+                    game.favorite = !game.favorite;
+                    repository.update(game);
+                    loadGames();
+                    Toast.makeText(this, game.favorite ? "已收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
+                }
                 else if (rematchItem.equals(chosen)) {
-                    if (metadataRepository != null) { if (usingBangumi()) metadataRepository.clearBangumi(game.id); else metadataRepository.clearVndb(game.id); }
-                    fetchSelectedMetadata(game);
+                    if (metadataRepository != null) {
+                        if (usingBangumi()) metadataRepository.clearBangumi(game.id);
+                        else metadataRepository.clearVndb(game.id);
+                    }
+                    fetchSelectedMetadata(game, true);
                 }
                 else if (customSearchItem.equals(chosen)) { if (usingBangumi()) showCustomBangumiSearchDialog(game); else showCustomVndbSearchDialog(game); }
                 else if (syncItem.equals(chosen)) syncVndbToGameCard(game);
@@ -2615,7 +2807,155 @@ private void showSideOptions(Game game) {
         scanInfo.setTextSize(12);
         root.addView(scanInfo, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-TextView accountTitle = new TextView(this);
+        TextView scanDepthTitle = new TextView(this);
+        scanDepthTitle.setText("\n启动时扫描最大深度");
+        scanDepthTitle.setTextColor(getColorCompat(R.color.yh_text));
+        scanDepthTitle.setTextSize(14);
+        scanDepthTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(scanDepthTitle);
+
+        TextView scanDepthInfo = new TextView(this);
+        int savedDepth = prefs == null ? DEFAULT_STARTUP_SCAN_DEPTH : prefs.getInt(KEY_STARTUP_SCAN_DEPTH, DEFAULT_STARTUP_SCAN_DEPTH);
+        savedDepth = Math.max(1, Math.min(MAX_STARTUP_SCAN_DEPTH, savedDepth));
+        scanDepthInfo.setText("当前：" + savedDepth + " 层（最深 4 层）");
+        scanDepthInfo.setTextColor(getColorCompat(R.color.yh_text_muted));
+        scanDepthInfo.setTextSize(11);
+        scanDepthInfo.setPadding(0, dp(4), 0, dp(6));
+        root.addView(scanDepthInfo);
+
+        LinearLayout depthRow = new LinearLayout(this);
+        depthRow.setOrientation(LinearLayout.HORIZONTAL);
+        depthRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        SeekBar scanDepthSeek = new SeekBar(this);
+        scanDepthSeek.setMax(MAX_STARTUP_SCAN_DEPTH - 1);
+        scanDepthSeek.setProgress(savedDepth - 1);
+        LinearLayout.LayoutParams seekLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        depthRow.addView(scanDepthSeek, seekLp);
+        TextView depthValue = new TextView(this);
+        depthValue.setText(String.valueOf(savedDepth));
+        depthValue.setTextColor(getColorCompat(R.color.yh_text));
+        depthValue.setTextSize(15);
+        depthValue.setTypeface(null, android.graphics.Typeface.BOLD);
+        depthValue.setPadding(dp(10), 0, 0, 0);
+        depthRow.addView(depthValue);
+        root.addView(depthRow);
+        scanDepthSeek.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int depth = Math.max(1, Math.min(MAX_STARTUP_SCAN_DEPTH, progress + 1));
+                depthValue.setText(String.valueOf(depth));
+                scanDepthInfo.setText("当前：" + depth + " 层（最深 4 层）");
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) { }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) { }
+        });
+        scanDepthSeek.setProgress(savedDepth - 1);
+
+        TextView fontTitle = new TextView(this);
+        fontTitle.setText("\n整体字体大小");
+        fontTitle.setTextColor(getColorCompat(R.color.yh_text));
+        fontTitle.setTextSize(14);
+        fontTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(fontTitle);
+
+        float savedFontScale = prefs == null ? UiScaleUtil.DEFAULT_FONT_SCALE : prefs.getFloat(UiScaleUtil.KEY_UI_FONT_SCALE, UiScaleUtil.DEFAULT_FONT_SCALE);
+        TextView fontInfo = new TextView(this);
+        fontInfo.setText("当前：" + UiScaleUtil.percent(savedFontScale) + "%（默认 100%）");
+        fontInfo.setTextColor(getColorCompat(R.color.yh_text_muted));
+        fontInfo.setTextSize(11);
+        fontInfo.setPadding(0, dp(4), 0, dp(6));
+        root.addView(fontInfo);
+
+        LinearLayout fontRow = new LinearLayout(this);
+        fontRow.setOrientation(LinearLayout.HORIZONTAL);
+        fontRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        SeekBar fontSeek = new SeekBar(this);
+        fontSeek.setMax((int) ((UiScaleUtil.MAX_FONT_SCALE - UiScaleUtil.MIN_FONT_SCALE) * 100f));
+        fontSeek.setProgress(Math.round((savedFontScale - UiScaleUtil.MIN_FONT_SCALE) * 100f));
+        LinearLayout.LayoutParams fontSeekLp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        fontRow.addView(fontSeek, fontSeekLp);
+        TextView fontValue = new TextView(this);
+        fontValue.setText(UiScaleUtil.percent(savedFontScale) + "%");
+        fontValue.setTextColor(getColorCompat(R.color.yh_text));
+        fontValue.setTextSize(15);
+        fontValue.setTypeface(null, android.graphics.Typeface.BOLD);
+        fontValue.setPadding(dp(10), 0, 0, 0);
+        fontRow.addView(fontValue);
+        root.addView(fontRow);
+        fontSeek.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                float scale = UiScaleUtil.clamp(UiScaleUtil.MIN_FONT_SCALE + progress / 100f);
+                fontValue.setText(UiScaleUtil.percent(scale) + "%");
+                fontInfo.setText("当前：" + UiScaleUtil.percent(scale) + "%（默认 100%）");
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) { }
+            @Override public void onStopTrackingTouch(SeekBar seekBar) { }
+        });
+        Button fontReset = krButton("恢复默认字体");
+        fontReset.setTextColor(getColorCompat(R.color.yh_text));
+        fontReset.setOnClickListener(v -> {
+            fontSeek.setProgress(Math.round((UiScaleUtil.DEFAULT_FONT_SCALE - UiScaleUtil.MIN_FONT_SCALE) * 100f));
+            fontValue.setText("100%");
+            fontInfo.setText("当前：100%（默认 100%）");
+        });
+        LinearLayout.LayoutParams fontResetLp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(40));
+        fontResetLp.topMargin = dp(6);
+        root.addView(fontReset, fontResetLp);
+
+        CheckBox autoScanCheck = krCheckBox("进入应用时自动扫描上次目录", prefs == null || prefs.getBoolean(KEY_AUTO_SCAN_ON_STARTUP, true));
+        root.addView(autoScanCheck);
+
+        TextView sortTitle = new TextView(this);
+        sortTitle.setText("\n游戏库排序");
+        sortTitle.setTextColor(getColorCompat(R.color.yh_text));
+        sortTitle.setTextSize(14);
+        sortTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(sortTitle);
+
+        TextView sortInfo = new TextView(this);
+        sortInfo.setText("默认按最近游玩排序，收藏会始终置顶。");
+        sortInfo.setTextColor(getColorCompat(R.color.yh_text_muted));
+        sortInfo.setTextSize(11);
+        sortInfo.setPadding(0, dp(4), 0, dp(6));
+        root.addView(sortInfo);
+
+        Spinner sortSpinner = new Spinner(this);
+        ArrayAdapter<String> sortAdapter = new ArrayAdapter<>(this, R.layout.spinner_item_dark, new String[]{"最近游玩", "最近添加", "名称排序"});
+        sortAdapter.setDropDownViewResource(R.layout.spinner_dropdown_dark);
+        sortSpinner.setAdapter(sortAdapter);
+        String savedSortMode = prefs == null ? SORT_MODE_RECENT : prefs.getString(KEY_SORT_MODE, SORT_MODE_RECENT);
+        if (SORT_MODE_NEWEST.equals(savedSortMode)) sortSpinner.setSelection(1);
+        else if (SORT_MODE_NAME.equals(savedSortMode)) sortSpinner.setSelection(2);
+        else sortSpinner.setSelection(0);
+        root.addView(sortSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+
+        TextView personalizationTitle = new TextView(this);
+        personalizationTitle.setText("\n个性化功能");
+        personalizationTitle.setTextColor(getColorCompat(R.color.yh_text));
+        personalizationTitle.setTextSize(14);
+        personalizationTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(personalizationTitle);
+
+        TextView engineLabelTitle = new TextView(this);
+        engineLabelTitle.setText("游戏引擎标签位置");
+        engineLabelTitle.setTextColor(getColorCompat(R.color.yh_text_muted));
+        engineLabelTitle.setTextSize(11);
+        engineLabelTitle.setPadding(0, dp(4), 0, dp(6));
+        root.addView(engineLabelTitle);
+
+        Spinner engineLabelSpinner = new Spinner(this);
+        ArrayAdapter<String> engineLabelAdapter = new ArrayAdapter<>(this, R.layout.spinner_item_dark, new String[]{"游戏标题下方", "封面左下角"});
+        engineLabelAdapter.setDropDownViewResource(R.layout.spinner_dropdown_dark);
+        engineLabelSpinner.setAdapter(engineLabelAdapter);
+        String engineLabelPos = prefs == null ? "title" : prefs.getString(KEY_ENGINE_LABEL_POSITION, "title");
+        engineLabelSpinner.setSelection("cover".equals(engineLabelPos) ? 1 : 0);
+        root.addView(engineLabelSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
+
+        TextView accountTitle = new TextView(this);
 accountTitle.setText("\n账户与同步");
 accountTitle.setTextColor(getColorCompat(R.color.yh_text));
 accountTitle.setTextSize(14);
@@ -2701,10 +3041,13 @@ LinearLayout accountActions = new LinearLayout(this);
         root.addView(sourceTitle);
 
         Spinner sourceSpinner = new Spinner(this);
-        ArrayAdapter<String> sourceAdapter = new ArrayAdapter<>(this, R.layout.spinner_item_dark, new String[]{"VNDB（默认）", "Bangumi（需要 Token）"});
+        ArrayAdapter<String> sourceAdapter = new ArrayAdapter<>(this, R.layout.spinner_item_dark, new String[]{"VNDB（默认）", "Bangumi（需要 Token）", "Bangumi 镜像（需要 Token）"});
         sourceAdapter.setDropDownViewResource(R.layout.spinner_dropdown_dark);
         sourceSpinner.setAdapter(sourceAdapter);
-        sourceSpinner.setSelection(usingBangumi() ? 1 : 0);
+        String currentSource = metadataSource();
+        if (SOURCE_BANGUMI.equals(currentSource)) sourceSpinner.setSelection(1);
+        else if (SOURCE_BANGUMI_MIRROR.equals(currentSource)) sourceSpinner.setSelection(2);
+        else sourceSpinner.setSelection(0);
         root.addView(sourceSpinner, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)));
 
         TextView tokenLabel = new TextView(this);
@@ -2782,6 +3125,23 @@ LinearLayout accountActions = new LinearLayout(this);
         root.addView(bgDimEnabled);
         root.addView(bgVideoSound);
 
+        TextView krTitle = new TextView(this);
+        krTitle.setText("\nKRKR 引擎");
+        krTitle.setTextColor(getColorCompat(R.color.yh_text));
+        krTitle.setTextSize(14);
+        krTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(krTitle);
+
+        TextView krInfo = new TextView(this);
+        krInfo.setText("兼容模式会使用更接近原生 KRKR 的启动参数。默认关闭；仅在内置 KRKR 崩溃、黑屏或启动异常时尝试开启。");
+        krInfo.setTextColor(getColorCompat(R.color.yh_text_muted));
+        krInfo.setTextSize(11);
+        krInfo.setPadding(0, dp(4), 0, dp(6));
+        root.addView(krInfo);
+
+        CheckBox krCompatMode = krCheckBox("KR 兼容模式", prefs.getBoolean(KEY_KR_COMPAT_MODE, false));
+        root.addView(krCompatMode);
+
         Button nativeKrkrButton = krButton("进入原生KRKR");
         nativeKrkrButton.setTextColor(getColorCompat(R.color.yh_primary));
         nativeKrkrButton.setOnClickListener(v -> {
@@ -2812,22 +3172,36 @@ LinearLayout accountActions = new LinearLayout(this);
             dialog.getWindow().setLayout((int) (getResources().getDisplayMetrics().widthPixels * 0.58f), (int) (getResources().getDisplayMetrics().heightPixels * 0.78f));
         }
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            boolean bangumi = sourceSpinner.getSelectedItemPosition() == 1;
+            int sourceSelection = sourceSpinner.getSelectedItemPosition();
+            boolean bangumi = sourceSelection == 1;
+            boolean bangumiMirror = sourceSelection == 2;
             String token = tokenInput.getText() == null ? "" : tokenInput.getText().toString().trim();
-            if (bangumi && token.isEmpty()) {
+            if ((bangumi || bangumiMirror) && token.isEmpty()) {
                 Toast.makeText(this, "选择 Bangumi 时需要填写 Token", Toast.LENGTH_SHORT).show();
                 return;
             }
+            int depth = Math.max(1, Math.min(MAX_STARTUP_SCAN_DEPTH, scanDepthSeek.getProgress() + 1));
+            float fontScale = UiScaleUtil.clamp(UiScaleUtil.MIN_FONT_SCALE + fontSeek.getProgress() / 100f);
+            String sortMode = SORT_MODE_RECENT;
+            int sortSelection = sortSpinner.getSelectedItemPosition();
+            if (sortSelection == 1) sortMode = SORT_MODE_NEWEST;
+            else if (sortSelection == 2) sortMode = SORT_MODE_NAME;
             prefs.edit()
-                    .putString(KEY_METADATA_SOURCE, bangumi ? SOURCE_BANGUMI : SOURCE_VNDB)
+                    .putString(KEY_METADATA_SOURCE, bangumiMirror ? SOURCE_BANGUMI_MIRROR : (bangumi ? SOURCE_BANGUMI : SOURCE_VNDB))
                     .putString(KEY_BANGUMI_TOKEN, token)
+                    .putInt(KEY_STARTUP_SCAN_DEPTH, depth)
+                    .putBoolean(KEY_AUTO_SCAN_ON_STARTUP, autoScanCheck.isChecked())
+                    .putString(KEY_ENGINE_LABEL_POSITION, engineLabelSpinner.getSelectedItemPosition() == 1 ? "cover" : "title")
+                    .putString(KEY_SORT_MODE, sortMode)
                     .putBoolean(KEY_BACKGROUND_DIM_ENABLED, bgDimEnabled.isChecked())
-                    .putBoolean(KEY_BACKGROUND_VIDEO_SOUND, bgVideoSound.isChecked())
+                .putBoolean(KEY_BACKGROUND_VIDEO_SOUND, bgVideoSound.isChecked())
+                .putBoolean(KEY_KR_COMPAT_MODE, krCompatMode.isChecked())
+                .putFloat(UiScaleUtil.KEY_UI_FONT_SCALE, fontScale)
                     .apply();
             applyCustomBackground();
-            Toast.makeText(this, "已保存资料源：" + (bangumi ? "Bangumi" : "VNDB"), Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "已保存资料源：" + (bangumiMirror ? "Bangumi镜像" : (bangumi ? "Bangumi" : "VNDB")) + "，扫描深度：" + depth + " 层，字体：" + UiScaleUtil.percent(fontScale) + "%", Toast.LENGTH_SHORT).show();
             dialog.dismiss();
-            if (selectedGame != null) updateSideDetail(selectedGame);
+            recreate();
         });
         chooseBgButton.setOnClickListener(v -> {
             dialog.dismiss();
@@ -3772,6 +4146,119 @@ private String displayPath(String value) {
                 .show();
     }
 
+    private void showEditPlayTimeDialog(Game game) {
+        if (game == null || game.id <= 0) return;
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundResource(R.drawable.bg_dialog);
+        int pad = dp(16);
+        root.setPadding(pad, dp(12), pad, dp(10));
+
+        TextView info = new TextView(this);
+        info.setText("当前总时长：" + TimeFormatUtil.playTime(game.totalPlayTime) + "\n最近游玩：" + TimeFormatUtil.date(game.lastPlayedAt));
+        info.setTextColor(getColorCompat(R.color.yh_text_muted));
+        info.setTextSize(12);
+        info.setLineSpacing(dp(2), 1.0f);
+        root.addView(info);
+
+        TextView totalLabel = new TextView(this);
+        totalLabel.setText("\n设置新的总时长");
+        totalLabel.setTextColor(getColorCompat(R.color.yh_text));
+        totalLabel.setTextSize(14);
+        totalLabel.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(totalLabel);
+
+        EditText totalInput = krEdit("例如 3h 20m / 200m / 7200s / 2.5h", TimeFormatUtil.playTime(game.totalPlayTime));
+        totalInput.setText(parseDurationForEdit(game.totalPlayTime));
+        root.addView(totalInput, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+
+        TextView addLabel = new TextView(this);
+        addLabel.setText("\n追加游玩时长");
+        addLabel.setTextColor(getColorCompat(R.color.yh_text));
+        addLabel.setTextSize(14);
+        addLabel.setTypeface(null, android.graphics.Typeface.BOLD);
+        root.addView(addLabel);
+
+        EditText addInput = krEdit("例如 30m / 1h30m / 0.5h", "");
+        root.addView(addInput, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)));
+
+        TextView hint = new TextView(this);
+        hint.setText("说明：上面的“总时长”会直接覆盖该游戏的累计时长；“追加游玩时长”会在当前基础上增加。两者可以二选一，也可以都填。");
+        hint.setTextColor(getColorCompat(R.color.yh_text_muted));
+        hint.setTextSize(11);
+        hint.setLineSpacing(dp(2), 1.0f);
+        hint.setPadding(0, dp(8), 0, 0);
+        root.addView(hint);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("修改游玩时长")
+                .setView(root)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("取消", null)
+                .show();
+        styleAlertDialogDark(dialog);
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setLayout((int) (getResources().getDisplayMetrics().widthPixels * 0.52f), android.view.WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            Long totalMinutes = parseDurationToMinutes(totalInput.getText() == null ? "" : totalInput.getText().toString().trim());
+            Long addMinutes = parseDurationToMinutes(addInput.getText() == null ? "" : addInput.getText().toString().trim());
+            if ((totalMinutes == null || totalMinutes < 0) && (addMinutes == null || addMinutes <= 0)) {
+                Toast.makeText(this, "请填写有效的时长", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            long currentDuration = Math.max(0L, game.totalPlayTime);
+            long finalDuration = currentDuration;
+            if (totalMinutes != null && totalMinutes >= 0) {
+                finalDuration = totalMinutes * 60_000L;
+            }
+            if (addMinutes != null && addMinutes > 0) {
+                finalDuration += addMinutes * 60_000L;
+            }
+            repository.setManualPlayTimeForGame(game.id, finalDuration);
+            Toast.makeText(this, "游玩时长已更新", Toast.LENGTH_SHORT).show();
+            dialog.dismiss();
+            loadGames();
+            updateSideDetail(game);
+            updateProfilePanel();
+        });
+    }
+
+    private Long parseDurationToMinutes(String input) {
+        if (input == null) return null;
+        String s = input.trim().toLowerCase(Locale.ROOT);
+        if (s.isEmpty()) return null;
+        try {
+            if (s.matches("^\\d+$")) return Long.parseLong(s);
+            long totalMs = 0L;
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*([dhms])").matcher(s);
+            boolean matched = false;
+            while (m.find()) {
+                matched = true;
+                double value = Double.parseDouble(m.group(1));
+                String unit = m.group(2);
+                if ("d".equals(unit)) totalMs += (long) (value * 24d * 60d * 60d * 1000d);
+                else if ("h".equals(unit)) totalMs += (long) (value * 60d * 60d * 1000d);
+                else if ("m".equals(unit)) totalMs += (long) (value * 60d * 1000d);
+                else if ("s".equals(unit)) totalMs += (long) (value * 1000d);
+            }
+            if (!matched) return null;
+            return Math.max(0L, totalMs / 60_000L);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private String parseDurationForEdit(long durationMs) {
+        if (durationMs <= 0) return "0m";
+        long minutes = durationMs / 60_000L;
+        long hours = minutes / 60L;
+        long remain = minutes % 60L;
+        if (hours <= 0) return remain + "m";
+        if (remain <= 0) return hours + "h";
+        return hours + "h" + remain + "m";
+    }
+
     private int engineIndex(EngineType e) { if (e == EngineType.KIRIKIRI) return 1; if (e == EngineType.ONS) return 2; if (e == EngineType.TYRANO) return 3; if (e == EngineType.ARTEMIS) return 4; if (e == EngineType.WINLATOR) return 5; if (e == EngineType.GAMEHUB) return 6; if (e == EngineType.UNKNOWN) return 7; return 0; }
 
     private boolean isWinlatorPackageName(String pkg) {
@@ -4235,14 +4722,18 @@ private void showScanResults(List<ScanResult> results) {
     }
 
     private void runLibraryScan(Uri rootUri, boolean showToast) {
-        if (rootUri == null) return;
-        if (autoLibraryScanRunning) return;
-        autoLibraryScanRunning = true;
-        if (showToast) Toast.makeText(this, "正在扫描，请稍候...", Toast.LENGTH_SHORT).show();
+if (rootUri == null) return;
+if (autoLibraryScanRunning) return;
+autoLibraryScanRunning = true;
+runOnUiThread(() -> setScanLoading(true));
+if (showToast) Toast.makeText(this, "正在扫描，请稍候...", Toast.LENGTH_SHORT).show();
+        int scanDepth = prefs == null ? DEFAULT_STARTUP_SCAN_DEPTH : prefs.getInt(KEY_STARTUP_SCAN_DEPTH, DEFAULT_STARTUP_SCAN_DEPTH);
+        scanDepth = Math.max(1, Math.min(MAX_STARTUP_SCAN_DEPTH, scanDepth));
+        final int finalScanDepth = scanDepth;
         new Thread(() -> {
             List<ScanResult> results;
             try {
-                results = GameScanner.scan(this, rootUri);
+                results = GameScanner.scan(this, rootUri, finalScanDepth);
             } catch (Throwable t) {
                 Log.w("YukiHub", "library scan failed", t);
                 results = new ArrayList<>();
@@ -4251,6 +4742,7 @@ private void showScanResults(List<ScanResult> results) {
             if (stats.added > 0) new Thread(() -> autoMatchVndbForImportedGames(stats.importedGames)).start();
             runOnUiThread(() -> {
                 autoLibraryScanRunning = false;
+                setScanLoading(false);
                 loadGames();
                 if (showToast) Toast.makeText(this, "新增 " + stats.added + " 个，已存在 " + stats.skipped + " 个" + (stats.added > 0 ? "，正在自动匹配 VNDB 封面" : ""), Toast.LENGTH_SHORT).show();
             });
@@ -4270,6 +4762,10 @@ private void showScanResults(List<ScanResult> results) {
         String last = prefs.getString(KEY_LAST_SCAN_ROOT_URI, null);
         if (last == null || last.isEmpty()) return;
         runLibraryScan(Uri.parse(last), false);
+    }
+
+    private void setScanButtonLoadingState(boolean loading) {
+        setScanLoading(loading);
     }
 
     private String defaultLaunchTargetForEngine(EngineType engine) {
@@ -4363,12 +4859,18 @@ try {
             g.rootUri = r.uri;
             g.engine = r.engine;
             g.launchTarget = (r.launchTarget == null || r.launchTarget.trim().isEmpty()) ? defaultLaunchTargetForEngine(r.engine) : r.launchTarget;
-            Uri autoCover = findFirstLevelImage(r.uri);
-            if (autoCover != null) {
-                String cover = copyCoverToInternalStorage(autoCover);
+            String cover = null;
+            if (r.coverUri != null && !r.coverUri.trim().isEmpty()) {
+                cover = copyCoverToInternalStorage(Uri.parse(r.coverUri));
+            }
+            if (cover == null || cover.isEmpty()) {
+                Uri autoCover = findFirstLevelImage(r.uri);
+                if (autoCover != null) cover = copyCoverToInternalStorage(autoCover);
+            }
+            if (cover != null) {
                 g.coverUri = cover;
                 g.coverPersistUri = cover;
-                g.coverSourceType = cover == null ? 0 : 1;
+                g.coverSourceType = 1;
             }
             if (r.engine == EngineType.KIRIKIRI) g.emulatorPackage = "internal.krkr";
             if (r.engine == EngineType.ONS) g.emulatorPackage = "internal.ons";
@@ -4397,8 +4899,8 @@ try {
     private void launchGame(Game game) {
         String emulatorPackage = game.emulatorPackage == null ? "" : game.emulatorPackage.trim();
         if (emulatorPackage.isEmpty() && game.engine == EngineType.KIRIKIRI) emulatorPackage = "internal.krkr";
-if (emulatorPackage.isEmpty() && game.engine == EngineType.ONS) emulatorPackage = "internal.ons";
-if (emulatorPackage.isEmpty() && game.engine == EngineType.TYRANO) emulatorPackage = "internal.tyrano";
+        if (emulatorPackage.isEmpty() && game.engine == EngineType.ONS) emulatorPackage = "internal.ons";
+        if (emulatorPackage.isEmpty() && game.engine == EngineType.TYRANO) emulatorPackage = "internal.tyrano";
         if (emulatorPackage.isEmpty() && game.engine == EngineType.WINLATOR) emulatorPackage = guessInstalledWinlatorPackage();
         if (emulatorPackage.isEmpty() && game.engine == EngineType.GAMEHUB) emulatorPackage = guessInstalledGameHubPackage();
         if (game.engine == EngineType.ARTEMIS) {
@@ -4412,18 +4914,48 @@ if (emulatorPackage.isEmpty() && game.engine == EngineType.TYRANO) emulatorPacka
             launchTarget = game.title;
         }
         if (emulatorPackage.isEmpty()) { Toast.makeText(this, "请先编辑游戏，填写模拟器包名。", Toast.LENGTH_LONG).show(); return; }
-runningGameId = game.id;
+        runningGameId = game.id;
         sessionStart = System.currentTimeMillis();
         String launchType = resolveLaunchType(emulatorPackage);
         runningSessionId = repository.startPlaySession(game.id, sessionStart, launchType);
         launchedExternal = true;
-        if (!EmulatorLauncher.launchGame(this, emulatorPackage, game.rootUri, launchTarget, game.winlatorLaunchMode, game.gamehubLaunchMode, game.gamehubLocalGameId)) {
+        if (!launchGameInternal(game, emulatorPackage, launchTarget)) {
             repository.cancelPlaySession(runningSessionId);
-launchedExternal = false;
+            launchedExternal = false;
             runningGameId = -1;
             runningSessionId = -1;
             sessionStart = 0;
             Toast.makeText(this, "启动失败：未找到该模拟器，或该模拟器不接受当前启动目标", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private boolean launchGameInternal(Game game, String emulatorPackage, String launchTarget) {
+        if (game == null || emulatorPackage == null || emulatorPackage.trim().isEmpty()) return false;
+        String pkg = emulatorPackage.trim();
+        if (pkg.startsWith("internal.krkr") || pkg.equals("org.tvp.kirikiri2.internal")) {
+            boolean compatMode = prefs != null && prefs.getBoolean(KEY_KR_COMPAT_MODE, false);
+            return startActivitySafely(EmulatorLauncher.buildInternalKrkrIntent(this, game.rootUri, launchTarget, false, compatMode));
+        }
+        if (pkg.startsWith("internal.tyrano") || pkg.equals("com.yuki.yukihub.tyrano")) {
+            return startActivitySafely(EmulatorLauncher.buildInternalTyranoIntent(this, game.rootUri, launchTarget));
+        }
+        if (pkg.startsWith("internal.ons") || pkg.equals("com.yuki.yukihub.ons")) {
+            return startActivitySafely(EmulatorLauncher.buildInternalOnsIntent(this, game.rootUri, launchTarget));
+        }
+        if (pkg.startsWith("internal.artemis")) {
+            return startActivitySafely(EmulatorLauncher.buildInternalArtemisIntent(this, pkg, game.rootUri, launchTarget));
+        }
+        return EmulatorLauncher.launchGame(this, emulatorPackage, game.rootUri, launchTarget, game.winlatorLaunchMode, game.gamehubLaunchMode, game.gamehubLocalGameId);
+    }
+
+    private boolean startActivitySafely(android.content.Intent intent) {
+        if (intent == null) return false;
+        try {
+            startActivity(intent);
+            return true;
+        } catch (Throwable t) {
+            Log.w("YukiHub", "startActivitySafely failed", t);
+            return false;
         }
     }
 

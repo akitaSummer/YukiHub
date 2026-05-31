@@ -30,9 +30,19 @@ public class SyncManager {
     private static final String KEY_PROFILE_SIGNATURE = "profile_signature";
     private static final String KEY_PROFILE_AVATAR = "profile_avatar";
     private static final String KEY_METADATA_SOURCE = "metadata_source";
+    private static final String SOURCE_VNDB = "vndb";
+    private static final String SOURCE_BANGUMI = "bangumi";
+    private static final String SOURCE_BANGUMI_MIRROR = "bangumi_mirror";
     private static final String KEY_LAST_SCAN_ROOT_URI = "last_scan_root_uri";
-    private static final String KEY_BACKGROUND_DIM_ENABLED = "background_dim_enabled";
+private static final String KEY_BACKGROUND_DIM_ENABLED = "background_dim_enabled";
     private static final String KEY_BACKGROUND_DIM_ALPHA = "background_dim_alpha";
+    private static final String KEY_AUTO_SCAN_ON_STARTUP = "auto_scan_on_startup";
+    private static final String KEY_STARTUP_SCAN_DEPTH = "startup_scan_depth";
+    private static final String KEY_ENGINE_LABEL_POSITION = "engine_label_position";
+    private static final String KEY_SORT_MODE = "sort_mode";
+    private static final String KEY_BACKGROUND_VIDEO_SOUND = "background_video_sound";
+    private static final String KEY_KR_COMPAT_MODE = "kr_compat_mode";
+    private static final String KEY_UI_FONT_SCALE = "ui_font_scale";
 
     // 游戏库/游戏卡片信息必须完整同步；只限制动态类数据（游玩记录）数量。
     private static final int MAX_PLAY_SESSIONS = 200;
@@ -231,12 +241,25 @@ public class SyncManager {
         JSONObject profile = new JSONObject();
         profile.put("name", appPrefs.getString(KEY_PROFILE_NAME, "Yuki"));
         profile.put("signature", appPrefs.getString(KEY_PROFILE_SIGNATURE, ""));
-        profile.put("avatar_uri", appPrefs.getString(KEY_PROFILE_AVATAR, ""));
+        String avatarUri = appPrefs.getString(KEY_PROFILE_AVATAR, "");
+        // 只同步网络头像地址；本地 file/content 路径跨设备无效，也可能暴露本机目录。
+        if (avatarUri != null && (avatarUri.startsWith("http://") || avatarUri.startsWith("https://"))) {
+            profile.put("avatar_uri", avatarUri);
+        } else {
+            profile.put("avatar_uri", "");
+        }
         root.put("profile", profile);
 
         JSONObject settings = new JSONObject();
         settings.put("metadata_source", appPrefs.getString(KEY_METADATA_SOURCE, "vndb"));
-        settings.put("last_scan_root_uri", appPrefs.getString(KEY_LAST_SCAN_ROOT_URI, ""));
+        // 不同步 last_scan_root_uri：它通常包含用户本机目录/存储路径，跨设备无效且可能泄露隐私。
+        settings.put("auto_scan_on_startup", appPrefs.getBoolean(KEY_AUTO_SCAN_ON_STARTUP, false));
+        settings.put("startup_scan_depth", appPrefs.getInt(KEY_STARTUP_SCAN_DEPTH, 2));
+        settings.put("engine_label_position", appPrefs.getString(KEY_ENGINE_LABEL_POSITION, "title"));
+        settings.put("sort_mode", appPrefs.getString(KEY_SORT_MODE, "recent"));
+        settings.put("background_video_sound", appPrefs.getBoolean(KEY_BACKGROUND_VIDEO_SOUND, false));
+        settings.put("kr_compat_mode", appPrefs.getBoolean(KEY_KR_COMPAT_MODE, false));
+        settings.put("ui_font_scale", appPrefs.getFloat(KEY_UI_FONT_SCALE, 1.0f));
         // 不同步自定义背景文件引用：本地图片/视频路径跨设备通常无效，且视频背景不应进入同步逻辑。
         settings.put("background_dim_enabled", appPrefs.getBoolean(KEY_BACKGROUND_DIM_ENABLED, true));
         settings.put("background_dim_alpha", appPrefs.getInt(KEY_BACKGROUND_DIM_ALPHA, 120));
@@ -268,18 +291,30 @@ public class SyncManager {
         if (!"YukiHub".equals(root.optString("app", ""))) throw new Exception("不是有效的 YukiHub 同步文件");
         JSONObject profile = root.optJSONObject("profile");
         if (profile != null) {
+            String incomingAvatar = profile.optString("avatar_uri", "");
+            if (incomingAvatar == null || !(incomingAvatar.startsWith("http://") || incomingAvatar.startsWith("https://"))) incomingAvatar = "";
             appPrefs.edit()
                     .putString(KEY_PROFILE_NAME, profile.optString("name", appPrefs.getString(KEY_PROFILE_NAME, "Yuki")))
                     .putString(KEY_PROFILE_SIGNATURE, profile.optString("signature", appPrefs.getString(KEY_PROFILE_SIGNATURE, "")))
-                    .putString(KEY_PROFILE_AVATAR, profile.optString("avatar_uri", appPrefs.getString(KEY_PROFILE_AVATAR, "")))
+                    .putString(KEY_PROFILE_AVATAR, incomingAvatar)
                     .apply();
         }
         JSONObject settings = root.optJSONObject("settings");
         if (settings != null) {
             SharedPreferences.Editor e = appPrefs.edit();
             String source = settings.optString("metadata_source", "");
-            if ("vndb".equals(source) || "bangumi".equals(source)) e.putString(KEY_METADATA_SOURCE, source);
-            if (settings.has("last_scan_root_uri")) e.putString(KEY_LAST_SCAN_ROOT_URI, settings.optString("last_scan_root_uri", ""));
+            if (SOURCE_VNDB.equals(source) || SOURCE_BANGUMI.equals(source) || SOURCE_BANGUMI_MIRROR.equals(source)) e.putString(KEY_METADATA_SOURCE, source);
+            // 兼容旧备份：忽略 last_scan_root_uri，避免导入跨设备无效路径或泄露本机目录。
+            if (settings.has("auto_scan_on_startup")) e.putBoolean(KEY_AUTO_SCAN_ON_STARTUP, settings.optBoolean("auto_scan_on_startup", false));
+            if (settings.has("startup_scan_depth")) e.putInt(KEY_STARTUP_SCAN_DEPTH, Math.max(1, Math.min(4, settings.optInt("startup_scan_depth", 2))));
+            if (settings.has("engine_label_position")) e.putString(KEY_ENGINE_LABEL_POSITION, "cover".equals(settings.optString("engine_label_position", "title")) ? "cover" : "title");
+            if (settings.has("sort_mode")) {
+                String sort = settings.optString("sort_mode", "recent");
+                if ("name".equals(sort) || "newest".equals(sort) || "recent".equals(sort)) e.putString(KEY_SORT_MODE, sort);
+            }
+            if (settings.has("background_video_sound")) e.putBoolean(KEY_BACKGROUND_VIDEO_SOUND, settings.optBoolean("background_video_sound", false));
+            if (settings.has("kr_compat_mode")) e.putBoolean(KEY_KR_COMPAT_MODE, settings.optBoolean("kr_compat_mode", false));
+            if (settings.has("ui_font_scale")) e.putFloat(KEY_UI_FONT_SCALE, (float) Math.max(0.85d, Math.min(1.30d, settings.optDouble("ui_font_scale", 1.0d))));
             // 不导入 custom_background/custom_background_type，避免旧备份里的本地图片/视频路径污染新设备。
             if (settings.has("background_dim_enabled")) e.putBoolean(KEY_BACKGROUND_DIM_ENABLED, settings.optBoolean("background_dim_enabled", true));
             if (settings.has("background_dim_alpha")) e.putInt(KEY_BACKGROUND_DIM_ALPHA, settings.optInt("background_dim_alpha", 120));
