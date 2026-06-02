@@ -3,9 +3,7 @@ package com.yuki.yukihub.metadata;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -16,6 +14,8 @@ import java.util.List;
 public class BangumiClient {
     private static final String SEARCH_ENDPOINT_BGM = "https://api.bgm.tv/v0/search/subjects";
     private static final String SEARCH_ENDPOINT_MIRROR = "https://api.bangumi.one/v0/search/subjects";
+    private static final int MAX_RETRIES = 2;
+    private static final long RETRY_DELAY_MS = 1500;
 
     public static List<VnMetadata> searchCandidates(String keyword, String token, int limit) throws Exception {
         return searchCandidates(keyword, token, limit, false);
@@ -27,41 +27,76 @@ public class BangumiClient {
         if (token == null || token.trim().isEmpty()) throw new IllegalArgumentException("Bangumi token required");
 
         JSONObject body = new JSONObject();
-        body.put("keyword", cleanTitle(keyword));
+        body.put("keyword", MetadataUtils.cleanTitle(keyword));
         body.put("sort", "match");
         JSONObject filter = new JSONObject();
-        filter.put("type", new JSONArray().put(4)); // 4 = 游戏
+        filter.put("type", new JSONArray().put(4));
         body.put("filter", filter);
 
         String endpoint = useMirror ? SEARCH_ENDPOINT_MIRROR : SEARCH_ENDPOINT_BGM;
         String url = endpoint + "?limit=" + Math.max(1, Math.min(10, limit)) + "&offset=0";
-        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
-        conn.setRequestMethod("POST");
-        conn.setConnectTimeout(10000);
-        conn.setReadTimeout(15000);
-        conn.setDoOutput(true);
-        conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setRequestProperty("Authorization", "Bearer " + token.trim());
-        conn.setRequestProperty("User-Agent", "YukiHub/1.0 (https://github.com/YukiHub; Android Galgame manager)");
 
-        byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
-        conn.setFixedLengthStreamingMode(bytes.length);
-        try (OutputStream os = conn.getOutputStream()) { os.write(bytes); }
+        for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            HttpURLConnection conn = null;
+            InputStream is = null;
+            try {
+                conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setRequestMethod("POST");
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(15000);
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+                conn.setRequestProperty("Accept", "application/json");
+                conn.setRequestProperty("Authorization", "Bearer " + token.trim());
+                conn.setRequestProperty("User-Agent", "YukiHub/1.0 (https://github.com/YukiHub; Android Galgame manager)");
 
-        int code = conn.getResponseCode();
-        String text = readAll(code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream());
-        if (code < 200 || code >= 300) throw new RuntimeException("Bangumi HTTP " + code + ": " + text);
+                byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+                conn.setFixedLengthStreamingMode(bytes.length);
+                try (OutputStream os = conn.getOutputStream()) { os.write(bytes); }
 
-        JSONObject root = new JSONObject(text);
-        JSONArray data = root.optJSONArray("data");
-        if (data == null) return out;
-        for (int i = 0; i < data.length(); i++) {
-            JSONObject item = data.optJSONObject(i);
-            if (item == null) continue;
-            out.add(parseSubject(item));
+                int code = conn.getResponseCode();
+                is = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+                String text = MetadataUtils.readAndClose(is);
+                is = null; // readAndClose 已关闭流，置空防止 finally 二次关闭
+
+                if (code < 200 || code >= 300) {
+                    if (code == 429 || code >= 500) {
+                        if (attempt < MAX_RETRIES) {
+                            Thread.sleep(RETRY_DELAY_MS * (attempt + 1));
+                            continue;
+                        }
+                        throw new RuntimeException("Bangumi HTTP " + code + ": " + text);
+                    }
+                    throw new RuntimeException("Bangumi HTTP " + code + ": " + text);
+                }
+
+                JSONObject root = new JSONObject(text);
+                JSONArray data = root.optJSONArray("data");
+                if (data != null) {
+                    for (int i = 0; i < data.length(); i++) {
+                        JSONObject item = data.optJSONObject(i);
+                        if (item == null) continue;
+                        out.add(parseSubject(item));
+                    }
+                }
+                return out;
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                if (attempt < MAX_RETRIES) {
+                    try { Thread.sleep(RETRY_DELAY_MS * (attempt + 1)); } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw ie;
+                    }
+                    continue;
+                }
+                throw e;
+            } finally {
+                MetadataUtils.closeQuietly(is);
+                MetadataUtils.closeQuietly(conn);
+            }
         }
-        return out;
+        throw new IllegalStateException("unreachable");
     }
 
     public static VnMetadata searchFirst(String keyword, String token) throws Exception {
@@ -78,14 +113,14 @@ public class BangumiClient {
         int id = o.optInt("id", 0);
         m.id = id > 0 ? String.valueOf(id) : o.optString("id", "");
         m.romanTitle = o.optString("name", "");
-        m.chineseTitle = firstNonEmpty(o.optString("name_cn", ""), m.romanTitle);
+        m.chineseTitle = MetadataUtils.firstNonEmpty(o.optString("name_cn", ""), m.romanTitle);
         m.originalTitle = m.romanTitle;
         m.description = stripSummary(o.optString("summary", ""));
         m.released = o.optString("date", "");
 
         JSONObject images = o.optJSONObject("images");
         if (images != null) {
-            m.coverUrl = firstNonEmpty(images.optString("large", ""), firstNonEmpty(images.optString("common", ""), images.optString("grid", "")));
+            m.coverUrl = MetadataUtils.firstNonEmpty(images.optString("large", ""), MetadataUtils.firstNonEmpty(images.optString("common", ""), images.optString("grid", "")));
             if (m.coverUrl.startsWith("//")) m.coverUrl = "https:" + m.coverUrl;
         }
 
@@ -105,48 +140,15 @@ public class BangumiClient {
                 String name = tag.optString("name", "");
                 if (!name.isEmpty()) names.add(name);
             }
-            m.tagsText = join(names, "  ");
+            m.tagsText = MetadataUtils.join(names, "  ");
         }
 
         m.lengthText = "游玩时长：-";
         return m;
     }
 
-    private static String cleanTitle(String s) {
-        if (s == null) return "";
-        String x = s.replaceAll("[\\[\\]【】（）()].*", " ")
-                .replaceAll("(?i)complete|汉化|中文版|日文版|体验版|trial|patch", " ")
-                .replace('_', ' ')
-                .trim();
-        return x.isEmpty() ? s.trim() : x;
-    }
-
     private static String stripSummary(String s) {
         if (s == null) return "";
         return s.replace("\\r", "").trim();
-    }
-
-    private static String readAll(InputStream is) throws Exception {
-        if (is == null) return "";
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-        }
-        return sb.toString();
-    }
-
-    private static String firstNonEmpty(String a, String b) {
-        return a != null && !a.isEmpty() && !"null".equals(a) ? a : (b == null || "null".equals(b) ? "" : b);
-    }
-
-    private static String join(List<String> list, String sep) {
-        StringBuilder sb = new StringBuilder();
-        for (String s : list) {
-            if (s == null || s.isEmpty()) continue;
-            if (sb.length() > 0) sb.append(sep);
-            sb.append(s);
-        }
-        return sb.toString();
     }
 }
